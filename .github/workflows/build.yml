@@ -55,6 +55,19 @@ jobs:
           targets = "AArch64"
           EOF
 
+- name: 诊断链接环境
+  run: |
+    echo "=== cc location ==="
+    which cc
+    cc --version
+    echo "=== ld location ==="
+    which ld
+    ld -v 2>&1 || true
+    echo "=== SDK path ==="
+    xcrun --show-sdk-path
+    echo "=== lld ==="
+    which ld64.lld 2>/dev/null || echo "ld64.lld not found"
+
       - name: Stage 2自举编译
         run: |
           source $HOME/.cargo/env
