@@ -1,14 +1,12 @@
-# by ds v4 pro
-# fuck
-name: Build Rust for jailbreaked iOS device
+name: 自举编译 Rust for iOS（ARM64 宿主）
 
 on:
   workflow_dispatch:
     inputs:
       rust_version:
-        description: 'Rust 版本号（如 1.85.0）'
+        description: 'Rust 版本（如 1.85.0 或 stable）'
         required: true
-        default: '1.85.0'
+        default: 'stable'
 
 jobs:
   bootstrap:
@@ -21,11 +19,8 @@ jobs:
         run: |
           echo "=== 重新安装 Xcode CLT ==="
           sudo rm -rf /Library/Developer/CommandLineTools
-          # 用软件更新方式拉取最新 CLT
           softwareupdate --list 2>/dev/null | grep "\*.*Command Line" | head -n1 | awk -F'*' '{print $2}' | sed 's/^ *//' | xargs -I{} softwareupdate -i "{}" 2>/dev/null || true
-          # 兜底：让系统自动触发安装
           xcode-select --install 2>/dev/null || true
-          # 等待 CLT 就绪
           for i in $(seq 1 30); do
             if xcode-select -p &>/dev/null; then
               echo "CLT 就绪"
@@ -61,6 +56,8 @@ jobs:
       # ==================== 3. 环境诊断 ====================
       - name: 编译环境诊断
         run: |
+          echo "=== Runner 架构 ==="
+          uname -m
           echo "=== SDK 路径 ==="
           xcrun --show-sdk-path 2>/dev/null || echo "无 SDK"
           echo "=== macOS 版本 ==="
@@ -73,6 +70,8 @@ jobs:
           ld -v 2>&1 | head -n1 || true
           echo "=== lld 位置 ==="
           which ld64.lld 2>/dev/null || echo "lld 未安装"
+          echo "=== Homebrew 路径 ==="
+          brew --prefix
           echo "=== 可用内存 ==="
           vm_stat | head -n5
           echo "=== 磁盘空间 ==="
@@ -83,8 +82,8 @@ jobs:
         run: |
           cat > config.toml << 'EOF'
           [build]
-          # 构建工具运行在本机 x86_64 macOS 上
-          build = "x86_64-apple-darwin"
+          # Runner 是 Apple Silicon，直接用 aarch64 作为构建宿主
+          build = "aarch64-apple-darwin"
           # 产生的工具链运行在 ARM64 iOS 上
           host = ["aarch64-apple-ios"]
           target = ["aarch64-apple-ios"]
@@ -103,22 +102,24 @@ jobs:
           # 减少 codegen units 以降低内存峰值
           codegen-units = 1
           codegen-units-std = 1
+          # 给构建宿主（aarch64-apple-darwin）也加上 lld，统一链接器行为
+          lld = true
 
           [target.aarch64-apple-ios]
-          # 使用 lld 作为 iOS 目标的链接器
+          # iOS 目标使用 lld 链接器
           linker = "ld64.lld"
 
           [llvm]
           # 只针对 AArch64，跳过 x86/ARM32 等无用后端
           targets = "AArch64"
-          # 不使用 CI 预编译的 LLVM，因为它的 target 列表不全
+          # 不使用 CI 预编译的 LLVM
           download-ci-llvm = false
-          # 开启链接时优化以减小 LLVM 体积
+          # 链接并行数
           link-jobs = 4
           # 使用 ninja 加速 LLVM 构建
           ninja = true
           EOF
-          
+
           echo "=== config.toml 内容 ==="
           cat config.toml
 
@@ -126,19 +127,19 @@ jobs:
       - name: 执行 Stage 2 自举编译
         run: |
           source $HOME/.cargo/env
-          
+
           # 把临时目录改到工作区，避免 SIP 干扰
           export TMPDIR="$GITHUB_WORKSPACE/tmp"
           mkdir -p "$TMPDIR"
-          
+
           # 限制并行度，防止 OOM
           export CARGO_BUILD_JOBS=4
-          
+
           echo "=== 开始自举编译 ==="
           echo "当前时间: $(date)"
-          
+
           python3 x.py build --stage 2
-          
+
           echo "=== 自举编译完成 ==="
           echo "当前时间: $(date)"
 
@@ -146,18 +147,17 @@ jobs:
       - name: 验证编译产物
         run: |
           STAGE2_DIR="build/aarch64-apple-ios/stage2"
-          
+
           echo "=== 检查产物目录 ==="
           ls -la "$STAGE2_DIR/bin/" 2>/dev/null || echo "!!! bin 目录不存在"
           ls -la "$STAGE2_DIR/lib/" 2>/dev/null || echo "!!! lib 目录不存在"
-          
+
           echo "=== rustc 文件类型 ==="
           file "$STAGE2_DIR/bin/rustc" 2>/dev/null || echo "!!! rustc 不存在"
-          
-          # 尝试用 lipo 查看架构信息
+
           echo "=== 架构信息 ==="
           lipo -info "$STAGE2_DIR/bin/rustc" 2>/dev/null || echo "lipo 无法读取（可能是单架构）"
-          
+
           if [ ! -f "$STAGE2_DIR/bin/rustc" ]; then
             echo "FATAL: rustc 未生成，构建失败"
             exit 1
@@ -167,7 +167,7 @@ jobs:
       - name: 对产物进行 ldid 签名
         run: |
           STAGE2_DIR="build/aarch64-apple-ios/stage2"
-          
+
           echo "=== 签名二进制文件 ==="
           for bin in rustc cargo rustdoc clippy-driver; do
             if [ -f "$STAGE2_DIR/bin/$bin" ]; then
@@ -177,26 +177,25 @@ jobs:
               echo "跳过: $bin (不存在)"
             fi
           done
-          
-          # 签名动态库（如果有的话）
+
+          echo "=== 签名动态库 ==="
           for lib in $(find "$STAGE2_DIR/lib" -name "*.dylib" 2>/dev/null); do
             echo "签名库: $lib"
             ldid -S "$lib"
           done
 
       # ==================== 8. 打包 ====================
-      - name: 创建合规的发行包
+      - name: 创建合规发行包
         run: |
           STAGE2_DIR="build/aarch64-apple-ios/stage2"
           RUST_VERSION="${{ github.event.inputs.rust_version }}"
           BUILD_DATE=$(date +'%Y-%m-%d')
-          
+
           mkdir -p release/bin release/lib
           cp -r "$STAGE2_DIR/bin/"* release/bin/
           cp -r "$STAGE2_DIR/lib/"* release/lib/
-          
-          # 生成合规声明
-          cat > release/NOTICE.txt << EOF
+
+          cat > release/NOTICE.txt << NOTICE
           Rust iOS 原生工具链 — 预编译二进制发行版
 
           本发行版包含 Rust 编程语言的编译器及工具链。
@@ -216,9 +215,9 @@ jobs:
           版本：${RUST_VERSION}
           构建日期：${BUILD_DATE}
           目标宿主机：aarch64-apple-ios
-          构建环境：GitHub Actions macOS Runner
-          EOF
-          
+          构建环境：GitHub Actions macOS Runner (Apple Silicon)
+          NOTICE
+
           tar -czf "rust-ios-toolchain-${RUST_VERSION}.tar.gz" -C release .
 
       # ==================== 9. 上传 ====================
@@ -229,7 +228,7 @@ jobs:
           path: rust-ios-toolchain-${{ github.event.inputs.rust_version }}.tar.gz
           retention-days: 7
 
-      # ==================== 10. 可选：直接发 Release ====================
+      # ==================== 10. 发布 GitHub Release ====================
       - name: 发布 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -240,6 +239,11 @@ jobs:
 
             ### 版本
             Rust &zwnj;**${{ github.event.inputs.rust_version }}**&zwnj; — 基于官方源码完整自举编译。
+
+            ### 构建信息
+            - 构建宿主：aarch64-apple-darwin (Apple Silicon)
+            - 目标宿主：aarch64-apple-ios
+            - 构建日期：$(date +'%Y-%m-%d')
 
             ### 包含
             - `rustc` — Rust 编译器
