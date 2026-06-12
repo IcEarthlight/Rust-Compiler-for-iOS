@@ -42,14 +42,14 @@ jobs:
           source $HOME/.cargo/env
           rustup default stable
 
-      # 拉取 Rust 源码
+      # 拉取 Rust 源码（fetch-depth: 0 避免 bootstrap 找不到父提交）
       - name: 检出 Rust 官方源码
         uses: actions/checkout@v4
         with:
           repository: rust-lang/rust
           ref: ${{ github.event.inputs.rust_version }}
           submodules: recursive
-          fetch-depth: 1
+          fetch-depth: 0
 
       # 编译前环境诊断
       - name: 编译环境诊断
