@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       rust_version:
-        description: 'Rust 版本'
-        default: 'stable'
+        description: Rust version
+        default: stable
 
 env:
   IOS_MIN_VER: "15.0"
@@ -19,117 +19,90 @@ jobs:
       fail-fast: false
 
     steps:
-      - name: [诊断] 系统环境快照
-        id: diag
+      - name: 系统环境快照
         run: |
           sw_vers
           uname -a
-          sysctl hw.memsize hw.ncpu 2>/dev/null || true
           df -h / || true
-          xcode-select -p 2>/dev/null || echo "CLT 未设置"
-          xcrun --show-sdk-version 2>/dev/null || echo "xcrun 不可用"
+          xcode-select -p 2>/dev/null || echo "CLT unset"
+          xcrun --show-sdk-version 2>/dev/null || echo "xcrun unavailable"
           for cmd in clang ld cmake ninja curl wget; do
-            echo -n "$cmd: "
-            command -v "$cmd" 2>/dev/null && echo "✓ $(command -v "$cmd")" || echo "✗ 缺失"
+            printf "%s: " "$cmd"
+            command -v "$cmd" 2>/dev/null && printf "installed\n" || printf "missing\n"
           done
 
-      - name: [修复] Xcode CLT 强制就绪
+      - name: 安装 Xcode CLT
         run: |
           if xcode-select -p &>/dev/null; then
-            echo "CLT 已安装: $(xcode-select -p)"
-          else
-            sudo rm -rf /Library/Developer/CommandLineTools 2>/dev/null || true
-            touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
-            softwareupdate -l 2>/dev/null | grep "\*.*Command Line" | head -1 | \
-              awk -F'*' '{print $2}' | sed 's/^ *//' | xargs -I{} softwareupdate -i "{}" 2>/dev/null || {
-              xcode-select --install 2>/dev/null || true
-            }
-            for i in $(seq 1 120); do
-              if xcode-select -p &>/dev/null; then
-                break
-              fi
-              [ $i -eq 120 ] && echo "⚠ CLT 安装超时，继续尝试"
-              sleep 5
-            done
+            echo "CLT already installed"
+            exit 0
           fi
+          sudo rm -rf /Library/Developer/CommandLineTools 2>/dev/null || true
+          touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+          softwareupdate -l 2>/dev/null | grep "Command Line" | head -1 | awk -F'*' '{print $2}' | sed 's/^ *//' | xargs -I{} softwareupdate -i "{}" 2>/dev/null || xcode-select --install 2>/dev/null || true
+          for i in $(seq 1 120); do
+            if xcode-select -p &>/dev/null; then break; fi
+            sleep 5
+          done
 
-      - name: [修复] 依赖包安装
+      - name: 安装依赖
         run: |
           export HOMEBREW_NO_AUTO_UPDATE=1
-          PACKAGES=(cmake ninja zstd curl openssl@3 libffi xz llvm wget binutils ldid)
-          for pkg in "${PACKAGES[@]}"; do
-            if brew list --versions "$pkg" &>/dev/null; then
-              echo "✓ $pkg 已安装"
-              continue
-            fi
+          for pkg in cmake ninja zstd curl openssl@3 libffi xz llvm wget binutils ldid; do
+            brew list --versions "$pkg" &>/dev/null && echo "OK: $pkg" && continue
             for attempt in 1 2 3; do
               brew install "$pkg" 2>/dev/null && break
               sleep 15
             done
-            brew list --versions "$pkg" &>/dev/null && echo "  ✓ 完成" || echo "  ⚠ 失败"
+            brew list --versions "$pkg" &>/dev/null && echo "Done: $pkg" || echo "FAIL: $pkg"
           done
 
-      - name: [获取] iOS SDK 自动采集
+      - name: 获取 iOS SDK
         id: sdk
         run: |
-          echo '#!/bin/bash
-          #源1：Xcode自带
-          local sdk
-          sdk=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
-          [ -d "$sdk" ] && { echo "$sdk"; return 0; }
-          #源2：搜索Xcode.app
-          sdk=$(find /Applications/Xcode.app -name "iPhoneOS.sdk" -type d 2>/dev/null | head -1)
-          [ -d "$sdk" ] && { echo "$sdk"; return 0; }
-          #源3：theos/sdks
-          for url in \
-            "https://github.com/theos/sdks/archive/refs/heads/master.zip" \
-            "https://github.com/xybp888/iOS-SDKs/archive/refs/heads/master.zip"; do
-            curl -L --retry 3 --retry-delay 30 -o /tmp/sdks.zip "$url" 2>/dev/null || continue
-            unzip -qo /tmp/sdks.zip -d /tmp/sdks_tmp 2>/dev/null || continue
-            sdk=$(find /tmp/sdks_tmp -name "iPhoneOS*.sdk" -type d 2>/dev/null | sort -Vr | head -1)
-            if [ -d "$sdk" ] && [ -f "$sdk/SDKSettings.plist" ]; then
-              echo "$sdk"
-              return 0
-            fi
-          done
-          #源4：xcodebuild下载平台
-          xcodebuild -downloadPlatform iOS 2>/dev/null || true
-          sdk=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
-          [ -d "$sdk" ] && { echo "$sdk"; return 0; }
-          #源5：最小stub SDK
-          SDK="/tmp/min_ios_sdk"
-          mkdir -p "$SDK/usr/include" "$SDK/usr/lib" "$SDK/System/Library/Frameworks"
-          /usr/libexec/PlistBuddy -c "Add :CanonicalName string iphoneos" "$SDK/SDKSettings.plist" 2>/dev/null || {
-            cat > "$SDK/SDKSettings.plist" << "PLISTEOF"
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict><key>CanonicalName</key><string>iphoneos</string></dict></plist>
-          PLISTEOF
+          fetch_sdk() {
+            local sdk
+            sdk=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
+            [ -d "$sdk" ] && { echo "$sdk"; return 0; }
+            sdk=$(find /Applications/Xcode.app -name "iPhoneOS.sdk" -type d 2>/dev/null | head -1)
+            [ -d "$sdk" ] && { echo "$sdk"; return 0; }
+            for url in \
+              "https://github.com/theos/sdks/archive/refs/heads/master.zip" \
+              "https://github.com/xybp888/iOS-SDKs/archive/refs/heads/master.zip"; do
+              curl -L --retry 3 --retry-delay 30 -o /tmp/sdks.zip "$url" 2>/dev/null || continue
+              unzip -qo /tmp/sdks.zip -d /tmp/sdks_tmp 2>/dev/null || continue
+              sdk=$(find /tmp/sdks_tmp -name "iPhoneOS*.sdk" -type d 2>/dev/null | sort -Vr | head -1)
+              [ -d "$sdk" ] && [ -f "$sdk/SDKSettings.plist" ] && { echo "$sdk"; return 0; }
+            done
+            xcodebuild -downloadPlatform iOS 2>/dev/null || true
+            sdk=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
+            [ -d "$sdk" ] && { echo "$sdk"; return 0; }
+            local stub="/tmp/min_ios_sdk"
+            mkdir -p "$stub/usr/include" "$stub/usr/lib" "$stub/System/Library/Frameworks"
+            printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CanonicalName</key><string>iphoneos</string></dict></plist>\n' > "$stub/SDKSettings.plist"
+            echo "$stub"
+            return 0
           }
-          echo "$SDK"
-          return 0' > /tmp/fetch_sdk.sh
-          source /tmp/fetch_sdk.sh
           SDK=$(fetch_sdk)
           echo "SDK_PATH=$SDK" >> $GITHUB_ENV
-          echo "✅ iOS SDK: $SDK"
-          ls "$SDK/usr/include" 2>/dev/null | head -5 || echo "⚠ 头文件缺失"
+          echo "SDK: $SDK"
+          ls "$SDK/usr/include" 2>/dev/null | head -5 || echo "No headers"
 
-      - name: [安装] Rust 工具链
+      - name: 安装 Rust 工具链
         run: |
           if command -v rustup &>/dev/null; then
-            echo "rustup 已安装"
+            echo "rustup already installed"
           else
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           fi
           source "$HOME/.cargo/env"
           rustup default stable
           rustup target add "$TARGET" 2>/dev/null || true
-          echo "Rust: $(rustc --version)"
-          echo "Cargo: $(cargo --version)"
+          rustc --version
+          cargo --version
 
-      - name: [生成] 交叉编译 Wrapper 脚本
+      - name: 生成交叉编译 Wrapper
         run: |
-          SDK="$SDK_PATH"
           TOOL_DIR="$HOME/ios-tools"
           mkdir -p "$TOOL_DIR"
 
@@ -139,20 +112,23 @@ jobs:
           printf '#!/bin/bash\nSDK="${IOS_SDK_PATH:-/tmp/min_ios_sdk}"\nMIN_VER="${IOS_MIN_VER:-15.0}"\nexec clang++ -arch arm64 -isysroot "$SDK" -mios-version-min="$MIN_VER" -stdlib=libc++ "$@"\n' > "$TOOL_DIR/ios-clang++"
           chmod +x "$TOOL_DIR/ios-clang++"
 
-          printf '#!/bin/bash\nSDK="${IOS_SDK_PATH:-/tmp/min_ios_sdk}"\nMIN_VER="${IOS_MIN_VER:-15.0}"\nclang -arch arm64 -isysroot "$SDK" -mios-version-min="$MIN_VER" -Wl,-dead_strip -Wl,-no_adhoc_codesign "$@" 2>/tmp/ld_err.log && exit 0\nclang -arch arm64 -isysroot "$SDK" -mios-version-min="$MIN_VER" -Wl,-dead_strip -Wl,-no_adhoc_codesign -Wl,-undefined,dynamic_lookup "$@" 2>/tmp/ld_err2.log && exit 0\nLD64=$(command -v ld64 2>/dev/null || echo "/usr/bin/ld")\n"$LD64" -arch arm64 -syslibroot "$SDK" -ios_version_min "$MIN_VER" -dead_strip "$@" 2>/tmp/ld_err3.log && exit 0\necho "=== 链接器全部失败 ==="\ncat /tmp/ld_err.log 2>/dev/null\nexit 1\n' > "$TOOL_DIR/ios-ld"
+          printf '#!/bin/bash\nSDK="${IOS_SDK_PATH:-/tmp/min_ios_sdk}"\nMIN_VER="${IOS_MIN_VER:-15.0}"\n' > "$TOOL_DIR/ios-ld"
+          printf 'clang -arch arm64 -isysroot "$SDK" -mios-version-min="$MIN_VER" -Wl,-dead_strip -Wl,-no_adhoc_codesign "$@" 2>/tmp/ld_err.log && exit 0\n' >> "$TOOL_DIR/ios-ld"
+          printf 'clang -arch arm64 -isysroot "$SDK" -mios-version-min="$MIN_VER" -Wl,-undefined,dynamic_lookup "$@" 2>/tmp/ld_err2.log && exit 0\n' >> "$TOOL_DIR/ios-ld"
+          printf 'LD64=$(command -v ld64 2>/dev/null || echo "/usr/bin/ld")\n"$LD64" -arch arm64 -syslibroot "$SDK" -ios_version_min "$MIN_VER" -dead_strip "$@" 2>/tmp/ld_err3.log && exit 0\n' >> "$TOOL_DIR/ios-ld"
+          printf 'echo "Linker all failed"\ncat /tmp/ld_err.log 2>/dev/null\nexit 1\n' >> "$TOOL_DIR/ios-ld"
           chmod +x "$TOOL_DIR/ios-ld"
 
-          echo 'int main(){return 0;}' > /tmp/test_wrap.c
+          printf 'int main(){return 0;}\n' > /tmp/test_wrap.c
           for wrap in ios-clang ios-clang++; do
-            echo -n "测试 $wrap: "
-            SDK="$SDK" "$TOOL_DIR/$wrap" /tmp/test_wrap.c -o /tmp/test_wrap_out 2>&1 && {
-              file /tmp/test_wrap_out | grep -q "arm64" && echo "✓" || echo "⚠ 非 arm64"
-            } || echo "✗ 编译失败"
+            printf "Test %s: " "$wrap"
+            SDK="$SDK_PATH" "$TOOL_DIR/$wrap" /tmp/test_wrap.c -o /tmp/test_wrap_out 2>&1 && {
+              file /tmp/test_wrap_out | grep -q "arm64" && printf "OK\n" || printf "Not arm64\n"
+            } || printf "FAIL\n"
           done
-          echo "Wrapper 就绪: $TOOL_DIR/"
           echo "TOOL_DIR=$TOOL_DIR" >> $GITHUB_ENV
 
-      - name: [检出] Rust 源码
+      - name: 检出 Rust 源码
         uses: actions/checkout@v4
         with:
           repository: rust-lang/rust
@@ -160,21 +136,16 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: [修复] Git 完整性
+      - name: 修复 Git 完整性
         run: |
           git fetch --unshallow 2>/dev/null || true
-          git submodule update --init --recursive --depth 1 2>/dev/null || \
-            git submodule update --init --recursive 2>/dev/null || true
+          git submodule update --init --recursive --depth 1 2>/dev/null || git submodule update --init --recursive 2>/dev/null || true
 
-      - name: [诊断] 构建前最终检查
+      - name: 构建前检查
         run: |
-          echo "=== 最终环境 ==="
           echo "SDK: $SDK_PATH"
           echo "Wrapper: $TOOL_DIR"
           echo "Clang: $(command -v clang)"
-          echo "LD: $(command -v ld)"
-          echo "磁盘: $(df -h / | tail -1)"
-          echo "内存: $(sysctl hw.memsize 2>/dev/null | awk '{print $2/1024/1024/1024 " GB"}')"
           RAM_GB=$(sysctl hw.memsize 2>/dev/null | awk '{printf "%.0f", $2/1024/1024/1024}')
           CPU=$(sysctl hw.ncpu 2>/dev/null | awk '{print $2}')
           if [ "$RAM_GB" -lt 8 ]; then JOBS=2
@@ -182,27 +153,27 @@ jobs:
           else JOBS=$CPU
           fi
           JOBS=$((JOBS < 1 ? 1 : JOBS))
-          echo "并行度: $JOBS"
+          echo "Jobs: $JOBS"
           echo "BUILD_JOBS=$JOBS" >> $GITHUB_ENV
 
-      - name: [配置] 生成 config.toml
+      - name: 生成 config.toml
         run: |
           ARCH=$(uname -m)
           [ "$ARCH" = "arm64" ] && BUILD_TRIPLE="aarch64-apple-darwin" || BUILD_TRIPLE="x86_64-apple-darwin"
 
           python3 -c "
           cfg = f'''[build]
-          build = \"{BUILD_TRIPLE}\"
-          host = [\"$TARGET\"]
-          target = [\"$TARGET\"]
+          build = \"{os.environ['BUILD_TRIPLE']}\"
+          host = [\"{os.environ['TARGET']}\"]
+          target = [\"{os.environ['TARGET']}\"]
           tools = [\"cargo\", \"rustc\", \"rustdoc\", \"clippy\"]
           docs = false
           vendor = true
 
-          [target.$TARGET]
-          cc = \"$TOOL_DIR/ios-clang\"
-          cxx = \"$TOOL_DIR/ios-clang++\"
-          linker = \"$TOOL_DIR/ios-ld\"
+          [target.{os.environ['TARGET']}]
+          cc = \"{os.environ['TOOL_DIR']}/ios-clang\"
+          cxx = \"{os.environ['TOOL_DIR']}/ios-clang++\"
+          linker = \"{os.environ['TOOL_DIR']}/ios-ld\"
           ar = \"ar\"
           ranlib = \"ranlib\"
 
@@ -223,12 +194,11 @@ jobs:
           '''
           with open('config.toml', 'w') as f:
               f.write(cfg)
-          " BUILD_TRIPLE="$BUILD_TRIPLE" TARGET="$TARGET" TOOL_DIR="$TOOL_DIR"
-
+          "
           echo "=== config.toml ==="
           cat config.toml
 
-      - name: [编译] Stage1 + Stage2 自动修复
+      - name: 编译 Stage1 + Stage2
         timeout-minutes: 360
         run: |
           source "$HOME/.cargo/env"
@@ -242,15 +212,14 @@ jobs:
 
             while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
               ATTEMPT=$((ATTEMPT + 1))
-              echo ""
-              echo "=========================================="
-              echo "  Stage$STAGE 第 $ATTEMPT/$MAX_ATTEMPTS 次尝试"
-              echo "=========================================="
+              printf "\n==========================================\n"
+              printf "  Stage%s attempt %s/%s\n" "$STAGE" "$ATTEMPT" "$MAX_ATTEMPTS"
+              printf "==========================================\n"
 
               (
                 while true; do
                   FREE_MEM=$(vm_stat 2>/dev/null | awk '/free/ {print $3}' | sed 's/\.//')
-                  [ -n "$FREE_MEM" ] && [ "$FREE_MEM" -lt 500 ] && echo "⚠ 内存不足！" >> /tmp/mem_warn.log
+                  [ -n "$FREE_MEM" ] && [ "$FREE_MEM" -lt 500 ] && echo "Low memory" >> /tmp/mem_warn.log
                   sleep 30
                 done
               ) &
@@ -258,87 +227,73 @@ jobs:
 
               set +e
               ./x build --stage "$STAGE" -j"${BUILD_JOBS:-4}" 2>&1 | tee "$LOG"
-              RC=${PIPESTEST:-$?}
+              RC=$?
               set -e
 
               kill $MEM_MON_PID 2>/dev/null || true
 
               if [ $RC -eq 0 ]; then
-                echo "✅ Stage$STAGE 编译成功（第 $ATTEMPT 次尝试）"
+                printf "Stage%s success (attempt %s)\n" "$STAGE" "$ATTEMPT"
                 return 0
               fi
 
-              echo "❌ Stage$STAGE 失败（退出码 $RC）"
-              echo ""
-              echo "=== 错误诊断 ==="
+              printf "Stage%s failed (exit %s)\n" "$STAGE" "$RC"
               tail -50 "$LOG" | grep -iE "error|fatal|fail|undefined|signal|linker|killed" | tail -10
 
               if grep -qiE "linker.*not found|ld.*command not found" "$LOG"; then
-                echo "🔧 修复：重新生成链接器 wrapper"
                 printf '#!/bin/bash\nSDK="${IOS_SDK_PATH:-/tmp/min_ios_sdk}"\nexec clang -arch arm64 -isysroot "$SDK" -mios-version-min=15.0 -Wl,-undefined,dynamic_lookup "$@"\n' > "$TOOL_DIR/ios-ld"
                 chmod +x "$TOOL_DIR/ios-ld"
-
+                echo "Fixed linker wrapper"
               elif grep -qiE "signal: 9|killed" "$LOG"; then
-                echo "🔧 修复：OOM，降低并行度"
                 BUILD_JOBS=$((BUILD_JOBS / 2))
                 [ "$BUILD_JOBS" -lt 1 ] && BUILD_JOBS=1
-                echo "新并行度: $BUILD_JOBS"
-
+                echo "Reduced jobs to $BUILD_JOBS"
               elif grep -qiE "fatal error.*stdio|fatal error.*stdlib" "$LOG"; then
-                echo "🔧 修复：SDK 头文件问题，stub 关键头文件"
-                SDK="$SDK_PATH"
                 for header in stdio.h stdlib.h string.h; do
-                  [ ! -f "$SDK/usr/include/$header" ] && {
-                    echo "/* stub */" > "$SDK/usr/include/$header"
-                  }
+                  [ ! -f "$SDK_PATH/usr/include/$header" ] && printf '/* stub */\n' > "$SDK_PATH/usr/include/$header"
                 done
-
+                echo "Stubbed missing headers"
               elif grep -qiE "could not compile|error\[E" "$LOG"; then
-                echo "🔧 修复：清理重编"
                 ./x clean 2>/dev/null || true
                 cargo clean 2>/dev/null || true
-
+                echo "Cleaned build artifacts"
               else
-                echo "⚠ 未知错误类型，尝试通用修复"
                 ./x clean 2>/dev/null || true
                 BUILD_JOBS=$((BUILD_JOBS > 2 ? BUILD_JOBS - 1 : 1))
+                echo "Generic retry, jobs: $BUILD_JOBS"
               fi
-
               sleep 5
             done
-
-            echo "❌ Stage$STAGE 在 $MAX_ATTEMPTS 次尝试后仍然失败"
+            printf "Stage%s failed after %s attempts\n" "$STAGE" "$MAX_ATTEMPTS"
             return 1
           }
 
-          echo ""
-          echo "╔══════════════════════════════════════════╗"
-          echo "║         开始 Stage1 编译                  ║"
-          echo "╚══════════════════════════════════════════╝"
+          printf "\n==========================================\n"
+          printf "  Stage1 compile\n"
+          printf "==========================================\n"
           STAGE1_OK=false
           compile_stage 1 && STAGE1_OK=true
 
           if [ "$STAGE1_OK" = "true" ]; then
-            echo ""
-            echo "╔══════════════════════════════════════════╗"
-            echo "║         开始 Stage2 编译（iOS 原生）       ║"
-            echo "╚══════════════════════════════════════════╝"
+            printf "\n==========================================\n"
+            printf "  Stage2 compile (iOS native)\n"
+            printf "==========================================\n"
             compile_stage 2 || {
-              echo "Stage2 失败，降级用 Stage1"
+              echo "Stage2 failed, fallback to Stage1"
               echo "STAGE2_FAILED=1" >> $GITHUB_ENV
             }
           else
-            echo "Stage1 失败，无法继续"
+            echo "Stage1 failed"
             echo "STAGE1_FAILED=1" >> $GITHUB_ENV
           fi
 
-          echo "=== 编译产物 ==="
+          echo "=== Products ==="
           find build -name "rustc" -type f 2>/dev/null | while read f; do
             echo "--- $f ---"
             file "$f" 2>/dev/null
           done
 
-      - name: [打包] 收集产物
+      - name: 打包产物
         if: always()
         run: |
           source "$HOME/.cargo/env"
@@ -358,23 +313,19 @@ jobs:
             }
           fi
 
-          echo "=== 打包内容 ==="
           find build/dist -type f 2>/dev/null | while read f; do
             TYPE=$(file "$f" 2>/dev/null)
             echo "$f"
             echo "  $TYPE"
             if echo "$TYPE" | grep -q "Mach-O"; then
-              otool -L "$f" 2>/dev/null | head -5 | sed 's/^/  /'
+              otool -L "$f" 2>/dev/null | head -5 | sed 's/^/    /'
             fi
           done
 
-          tar -czf rust-ios-toolchain.tar.gz -C build/dist . 2>/dev/null || {
-            tar -czf rust-ios-toolchain.tar.gz --files-from /dev/null
-          }
+          tar -czf rust-ios-toolchain.tar.gz -C build/dist . 2>/dev/null || tar -czf rust-ios-toolchain.tar.gz --files-from /dev/null
           ls -lh rust-ios-toolchain.tar.gz
-          file rust-ios-toolchain.tar.gz
 
-      - name: [上传] Artifact
+      - name: 上传 Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -382,28 +333,25 @@ jobs:
           path: rust-ios-toolchain.tar.gz
           retention-days: 14
 
-      - name: [报告] 构建诊断摘要
+      - name: 构建诊断报告
         if: always()
         run: |
-          echo "╔══════════════════════════════════════════╗"
-          echo "║            构建诊断报告                   ║"
-          echo "╚══════════════════════════════════════════╝"
-          echo "Stage1: ${STAGE1_OK:-未执行}"
-          echo "Stage2: $([ "$STAGE2_FAILED" = "1" ] && echo '失败(已降级)' || echo '成功/未执行')"
-          echo "SDK: $SDK_PATH"
-          echo "Wrapper: $TOOL_DIR"
-          echo "并行度: ${BUILD_JOBS:-4}"
+          printf "==========================================\n"
+          printf "  Build Report\n"
+          printf "==========================================\n"
+          printf "Stage1: %s\n" "${STAGE1_OK:-not run}"
+          printf "Stage2: %s\n" "$([ "$STAGE2_FAILED" = "1" ] && printf 'failed (fallback)' || printf 'ok/not run')"
+          printf "SDK: %s\n" "$SDK_PATH"
+          printf "Jobs: %s\n" "${BUILD_JOBS:-4}"
 
-          echo ""
-          echo "=== 错误摘要 ==="
+          printf "\n=== Errors ===\n"
           for log in /tmp/stage*.log; do
             [ -f "$log" ] || continue
-            echo "--- $log ---"
-            grep -iE "error|fatal|fail|warning:" "$log" 2>/dev/null | tail -20 || echo "无错误"
+            printf "--- %s ---\n" "$log"
+            grep -iE "error|fatal|fail|warning:" "$log" 2>/dev/null | tail -20 || echo "No errors"
           done
 
           if [ -f /tmp/mem_warn.log ]; then
-            echo ""
-            echo "=== 内存告警 ==="
+            printf "\n=== Memory Warnings ===\n"
             cat /tmp/mem_warn.log
           fi
