@@ -100,7 +100,7 @@ jobs:
           rustup target add "$TARGET" 2>/dev/null || true
           rustc --version
           cargo --version
-
+          
       - name: 生成交叉编译 Wrapper
         run: |
           TOOL_DIR="$HOME/ios-tools"
@@ -113,24 +113,32 @@ jobs:
           chmod +x "$TOOL_DIR/ios-clang++"
 
           cat > "$TOOL_DIR/ios-ld" << 'LDEOF'
-          #!/bin/bash
-          SDK="${IOS_SDK_PATH:-/tmp/min_ios_sdk}"
-          MIN_VER="${IOS_MIN_VER:-15.0}"
-          NEW_ARGS=()
-          skip_next=false
-          for arg in "$@"; do
-              if $skip_next; then skip_next=false; continue; fi
-              case "$arg" in
-                  -platform_version) skip_next=true;;  # skip -platform_version ios 10.0.0 10.0.0
-                  -syslibroot)       skip_next=true;;  # skip -syslibroot /path/to/sdk
-                  -install_name)     NEW_ARGS+=("-Wl,-install_name");;  # translate to clang-compatible
-                  -dylib)            NEW_ARGS+=("-dynamiclib");;       # translate to clang-compatible
-                  *)                 NEW_ARGS+=("$arg");;
-              esac
-          done
-          exec clang -arch arm64 -isysroot "$SDK" -mios-version-min="$MIN_VER" -Wl,-dead_strip "${NEW_ARGS[@]}"
-          LDEOF
+            #!/bin/bash
+            SDK="${IOS_SDK_PATH:-/tmp/min_ios_sdk}"
+            MIN_VER="${IOS_MIN_VER:-15.0}"
+            NEW_ARGS=()
+            skip_next=0
+            for arg in "$@"; do
+                if [ $skip_next -gt 0 ]; then
+                    skip_next=$((skip_next - 1))
+                    NEW_ARGS+=("-Wl,$arg")          # 将 @rpath/... 包装为 -Wl, 透传
+                    continue
+                fi
+                case "$arg" in
+                    -platform_version) skip_next=3;;  # 跳过 "ios X.Y.Z X.Y.Z" 共 3 个参数
+                    -syslibroot)       skip_next=1;;  # 跳过 SDK 路径
+                    -install_name)
+                        NEW_ARGS+=("-Wl,-install_name")
+                        skip_next=1                   # 下个参数 @rpath/... 被上面的逻辑处理
+                        ;;
+                    -dylib)            NEW_ARGS+=("-dynamiclib");;
+                    *)                 NEW_ARGS+=("$arg");;
+                esac
+            done
+            exec clang -arch arm64 -isysroot "$SDK" -mios-version-min="$MIN_VER" -Wl,-dead_strip "${NEW_ARGS[@]}"
+            LDEOF
           chmod +x "$TOOL_DIR/ios-ld"
+
 
           # 验证
           printf 'int main(){return 0;}\n' > /tmp/test_wrap.c
@@ -309,6 +317,18 @@ jobs:
             file "$f" 2>/dev/null
           done
 
+      - name: 验证 iOS 二进制
+        run: |
+          RUSTC=build/aarch64-apple-ios/stage2/bin/rustc
+          if [ -f "$RUSTC" ]; then
+            echo "=== iOS rustc binary ==="
+            file "$RUSTC"
+            otool -l "$RUSTC" 2>/dev/null | grep -A2 "LC_BUILD_VERSION" | head -5
+          else
+            echo "NO iOS rustc binary found"
+            find build -name "rustc" -type f
+          fi
+          
       - name: 打包产物
         if: always()
         run: |
@@ -363,8 +383,8 @@ jobs:
           printf "\n=== Errors ===\n"
           for log in /tmp/stage*.log; do
             [ -f "$log" ] || continue
-            printf "--- %s ---\n" "$log"
-            grep -iE "error|fatal|fail|warning:" "$log" 2>/dev/null | tail -20 || echo "No errors"
+            printf -- "--- %s ---\n" "$log"
+            grep -iE -- "error|fatal|fail|warning:" "$log" 2>/dev/null | tail -20 || echo "No errors"
           done
 
           if [ -f /tmp/mem_warn.log ]; then
