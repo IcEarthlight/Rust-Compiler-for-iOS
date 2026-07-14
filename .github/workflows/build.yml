@@ -112,13 +112,27 @@ jobs:
           printf '#!/bin/bash\nSDK="${IOS_SDK_PATH:-/tmp/min_ios_sdk}"\nMIN_VER="${IOS_MIN_VER:-15.0}"\nexec clang++ -arch arm64 -isysroot "$SDK" -mios-version-min="$MIN_VER" -stdlib=libc++ "$@"\n' > "$TOOL_DIR/ios-clang++"
           chmod +x "$TOOL_DIR/ios-clang++"
 
-          printf '#!/bin/bash\nSDK="${IOS_SDK_PATH:-/tmp/min_ios_sdk}"\nMIN_VER="${IOS_MIN_VER:-15.0}"\n' > "$TOOL_DIR/ios-ld"
-          printf 'clang -arch arm64 -isysroot "$SDK" -mios-version-min="$MIN_VER" -Wl,-dead_strip -Wl,-no_adhoc_codesign "$@" 2>/tmp/ld_err.log && exit 0\n' >> "$TOOL_DIR/ios-ld"
-          printf 'clang -arch arm64 -isysroot "$SDK" -mios-version-min="$MIN_VER" -Wl,-undefined,dynamic_lookup "$@" 2>/tmp/ld_err2.log && exit 0\n' >> "$TOOL_DIR/ios-ld"
-          printf 'LD64=$(command -v ld64 2>/dev/null || echo "/usr/bin/ld")\n"$LD64" -arch arm64 -syslibroot "$SDK" -ios_version_min "$MIN_VER" -dead_strip "$@" 2>/tmp/ld_err3.log && exit 0\n' >> "$TOOL_DIR/ios-ld"
-          printf 'echo "Linker all failed"\ncat /tmp/ld_err.log 2>/dev/null\nexit 1\n' >> "$TOOL_DIR/ios-ld"
+          cat > "$TOOL_DIR/ios-ld" << 'LDEOF'
+          #!/bin/bash
+          SDK="${IOS_SDK_PATH:-/tmp/min_ios_sdk}"
+          MIN_VER="${IOS_MIN_VER:-15.0}"
+          NEW_ARGS=()
+          skip_next=false
+          for arg in "$@"; do
+              if $skip_next; then skip_next=false; continue; fi
+              case "$arg" in
+                  -platform_version) skip_next=true;;  # skip -platform_version ios 10.0.0 10.0.0
+                  -syslibroot)       skip_next=true;;  # skip -syslibroot /path/to/sdk
+                  -install_name)     NEW_ARGS+=("-Wl,-install_name");;  # translate to clang-compatible
+                  -dylib)            NEW_ARGS+=("-dynamiclib");;       # translate to clang-compatible
+                  *)                 NEW_ARGS+=("$arg");;
+              esac
+          done
+          exec clang -arch arm64 -isysroot "$SDK" -mios-version-min="$MIN_VER" -Wl,-dead_strip "${NEW_ARGS[@]}"
+          LDEOF
           chmod +x "$TOOL_DIR/ios-ld"
 
+          # 验证
           printf 'int main(){return 0;}\n' > /tmp/test_wrap.c
           for wrap in ios-clang ios-clang++; do
             printf "Test %s: " "$wrap"
