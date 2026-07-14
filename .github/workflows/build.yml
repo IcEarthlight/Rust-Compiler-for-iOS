@@ -162,6 +162,7 @@ jobs:
           [ "$ARCH" = "arm64" ] && BUILD_TRIPLE="aarch64-apple-darwin" || BUILD_TRIPLE="x86_64-apple-darwin"
 
           python3 -c "
+          import os
           cfg = f'''[build]
           build = \"{os.environ['BUILD_TRIPLE']}\"
           host = [\"{os.environ['TARGET']}\"]
