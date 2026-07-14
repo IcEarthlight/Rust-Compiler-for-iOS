@@ -160,6 +160,7 @@ jobs:
         run: |
           ARCH=$(uname -m)
           [ "$ARCH" = "arm64" ] && BUILD_TRIPLE="aarch64-apple-darwin" || BUILD_TRIPLE="x86_64-apple-darwin"
+          export BUILD_TRIPLE
 
           python3 -c "
           import os
