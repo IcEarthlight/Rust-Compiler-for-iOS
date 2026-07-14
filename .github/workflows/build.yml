@@ -170,7 +170,7 @@ jobs:
           target = [\"{os.environ['TARGET']}\"]
           tools = [\"cargo\", \"rustc\", \"rustdoc\", \"clippy\"]
           docs = false
-          vendor = true
+          vendor = false
 
           [target.{os.environ['TARGET']}]
           cc = \"{os.environ['TOOL_DIR']}/ios-clang\"
